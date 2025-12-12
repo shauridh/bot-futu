@@ -1,5 +1,5 @@
-# Gunakan Python 3.12-slim
-FROM python:3.12-slim
+# Gunakan Python 3.11 (Wajib untuk Pandas 1.5.3)
+FROM python:3.11-slim
 
 # Set Timezone Jakarta
 ENV TZ=Asia/Jakarta
@@ -10,7 +10,7 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# Install Compiler (Wajib untuk build library berat)
+# Install Compiler (Wajib untuk install Pandas versi lama)
 RUN apt-get update && \
     apt-get install -y gcc python3-dev libffi-dev && \
     rm -rf /var/lib/apt/lists/*
