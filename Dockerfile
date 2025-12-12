@@ -1,21 +1,20 @@
-# Gunakan image python yang ringan
-FROM python:3.10-slim
+# GANTI DARI: python:3.9-slim
+# MENJADI: python:3.9 (Image standar yang lebih lengkap)
+FROM python:3.9
 
-# Set folder kerja
+# Set working directory
 WORKDIR /app
 
-# --- BAGIAN PENTING ---
-# Kita wajib install 'git' di level OS dulu, 
-# karena requirements.txt akan mengambil library langsung dari Github.
-RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
-# ----------------------
+# Upgrade pip terlebih dahulu untuk menghindari masalah kompatibilitas
+RUN pip install --upgrade pip
 
-# Copy requirements dan install
+# Copy requirements dan install dependencies
 COPY requirements.txt .
+# Hapus --no-cache-dir jika internet lambat, tapi di VPS biasanya aman
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Copy sisa kode (bot.py, dll)
+# Copy seluruh kode ke dalam container
 COPY . .
 
-# Jalankan bot (pastikan nama filenya benar bot.py)
-CMD ["python", "bot.py", "-u"]
+# Perintah untuk menjalankan bot
+CMD ["python", "-u", "main.py"]
