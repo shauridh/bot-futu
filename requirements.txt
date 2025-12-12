@@ -1,0 +1,6 @@
+ccxt
+pandas
+pandas_ta
+python-telegram-bot==20.0
+schedule
+numpy<2.0
