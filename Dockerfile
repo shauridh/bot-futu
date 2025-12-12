@@ -1,26 +1,21 @@
-# Gunakan Python 3.11 (Wajib untuk Pandas 1.5.3)
-FROM python:3.11-slim
+# Gunakan image python yang ringan
+FROM python:3.10-slim
 
-# Set Timezone Jakarta
-ENV TZ=Asia/Jakarta
-RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
-
-# Log Real-time
-ENV PYTHONUNBUFFERED=1
-
+# Set folder kerja
 WORKDIR /app
 
-# Install Compiler (Wajib untuk install Pandas versi lama)
-RUN apt-get update && \
-    apt-get install -y gcc python3-dev libffi-dev && \
-    rm -rf /var/lib/apt/lists/*
+# --- BAGIAN PENTING ---
+# Kita wajib install 'git' di level OS dulu, 
+# karena requirements.txt akan mengambil library langsung dari Github.
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+# ----------------------
 
+# Copy requirements dan install
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+
+# Copy sisa kode (bot.py, dll)
 COPY . .
 
-# Upgrade pip
-RUN pip install --upgrade pip
-
-# Install library
-RUN pip install -r requirements.txt
-
-CMD ["python", "bot.py"]
+# Jalankan bot (pastikan nama filenya benar bot.py)
+CMD ["python", "bot.py", "-u"]
