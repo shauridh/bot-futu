@@ -1,5 +1,5 @@
 ccxt
-pandas
+pandas>=2.2.0
 pandas_ta
 python-telegram-bot==20.0
 schedule
