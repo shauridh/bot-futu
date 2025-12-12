@@ -1,6 +1,4 @@
-ccxt
-pandas==1.5.3
-numpy==1.23.5
-https://github.com/aarigs/pandas-ta/archive/refs/heads/master.zip
-python-telegram-bot==20.0
-schedule
+pandas
+numpy
+# ... library lain ...
+https://www.pandas-ta.dev/assets/zip/pandas_ta-0.4.71b0.tar.gz
