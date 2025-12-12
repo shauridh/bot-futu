@@ -1,4 +1,5 @@
 pandas
 numpy
-# ... library lain ...
-https://www.pandas-ta.dev/assets/zip/pandas_ta-0.4.71b0.tar.gz
+requests
+# Mengambil pandas-ta versi development (Fix error Supertrend & Append)
+git+https://github.com/twopirllc/pandas-ta.git@development
