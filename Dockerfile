@@ -10,7 +10,7 @@ ENV PYTHONUNBUFFERED=1
 
 WORKDIR /app
 
-# [SOLUSI] Install Compiler (gcc) dan library dasar untuk build
+# Install Compiler (Wajib untuk build library berat)
 RUN apt-get update && \
     apt-get install -y gcc python3-dev libffi-dev && \
     rm -rf /var/lib/apt/lists/*
