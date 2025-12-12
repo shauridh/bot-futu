@@ -1,6 +1,6 @@
 ccxt
-pandas>=2.2.0
-pandas_ta
+pandas
+https://github.com/aarigs/pandas-ta/archive/refs/heads/master.zip
 python-telegram-bot==20.0
 schedule
 numpy<2.0
