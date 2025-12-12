@@ -1,5 +1,11 @@
+# Core library
+# Kunci numpy di bawah versi 2.0 agar kompatibel dengan pandas_ta
+numpy<2.0
+
+# Library Data
 pandas
-numpy
-requests
-# Mengambil pandas-ta versi development (Fix error Supertrend & Append)
-git+https://github.com/twopirllc/pandas-ta.git@development
+pandas_ta
+
+# Library Exchange & Utils
+ccxt
+schedule
