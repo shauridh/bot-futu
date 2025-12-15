@@ -10,49 +10,45 @@ from datetime import datetime
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# --- SETTING TRADING ---
-SYMBOL = 'BTC/USDT'      
+# --- DATA LIST COIN ---
+# Kita pantau 10 koin futures teramai (High Volume)
+SYMBOLS = [
+    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT',
+    'DOGE/USDT', 'ADA/USDT', 'AVAX/USDT', 'LINK/USDT', 'TRX/USDT'
+]
+
 TIMEFRAME = '1h'         
-VIRTUAL_BALANCE = 1000   # Kita pura-pura punya 1000 USDT
 LEVERAGE = 5
 
-# --- VARIABLE SIMULASI (PAPER TRADING) ---
-# Menyimpan status posisi di memori bot
-current_position = None # None, 'LONG', atau 'SHORT'
-entry_price = 0
-sl_price = 0
-tp_price = 0
+# --- MEMORY PENYIMPANAN STATUS (STATE MANAGEMENT) ---
+# Dictionary untuk menyimpan status trading per koin
+# Format: active_trades['BTC/USDT'] = {'pos': 'LONG', 'entry': 50000, 'tp': 51000, 'sl': 49000}
+active_trades = {}
 
-print("--- STARTING PAPER TRADING BOT ---")
+print(f"--- STARTING MULTI-PAIR BOT ({len(SYMBOLS)} Pairs) ---")
 
-# Inisialisasi Exchange (MODE PUBLIC - TANPA API KEY)
-# Kita hanya butuh data harga, jadi tidak perlu login
+# Inisialisasi Exchange (Public Data)
 try:
-    exchange = ccxt.binance({
-        'options': {'defaultType': 'future'}
-    })
-    # Cek koneksi dengan ambil harga terakhir
-    ticker = exchange.fetch_ticker(SYMBOL)
-    print(f"✅ Koneksi Data Real-Time Berhasil! Harga {SYMBOL}: {ticker['last']}")
+    exchange = ccxt.binance({'options': {'defaultType': 'future'}})
+    exchange.load_markets() # Load market info dulu
+    print("✅ Koneksi Binance OK. Market loaded.")
 except Exception as e:
-    print(f"❌ Gagal koneksi ke Binance: {e}")
+    print(f"❌ Gagal Init: {e}")
     sys.exit(1)
 
 def send_telegram(msg):
     if not TELEGRAM_TOKEN: return
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     data = {"chat_id": TELEGRAM_CHAT_ID, "text": msg, "parse_mode": "HTML"}
-    try: 
-        requests.post(url, data=data, timeout=10)
-    except Exception as e:
-        print(f"⚠️ Error Telegram: {e}")
+    try: requests.post(url, data=data, timeout=10)
+    except: pass
 
 def calculate_indicators(df):
     df['EMA_9'] = df['close'].ewm(span=9, adjust=False).mean()
     df['EMA_21'] = df['close'].ewm(span=21, adjust=False).mean()
     df['EMA_200'] = df['close'].ewm(span=200, adjust=False).mean()
     
-    # ATR Calculation
+    # ATR Logic
     df['tr1'] = df['high'] - df['low']
     df['tr2'] = abs(df['high'] - df['close'].shift())
     df['tr3'] = abs(df['low'] - df['close'].shift())
@@ -60,116 +56,108 @@ def calculate_indicators(df):
     df['ATR'] = df['tr'].rolling(window=14).mean()
     return df
 
-def get_data():
+def get_data(symbol):
     try:
-        # Ambil data REAL MARKET (Bukan Testnet)
-        bars = exchange.fetch_ohlcv(SYMBOL, timeframe=TIMEFRAME, limit=250)
+        bars = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=205)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
         df['time'] = pd.to_datetime(df['time'], unit='ms')
         return calculate_indicators(df)
     except Exception as e:
-        print(f"Error fetch data: {e}")
+        print(f"⚠️ Skip {symbol}: {e}")
         return None
 
-def execute_simulation(action, price, atr):
-    global current_position, entry_price, sl_price, tp_price
-    
+def open_position(symbol, action, price, atr):
     # Hitung TP/SL
     sl_pips = atr * 1.5
     
     if action == 'LONG':
-        current_position = 'LONG'
-        entry_price = price
         sl_real = price - sl_pips
         tp_real = price + (sl_pips * 2.0)
-    elif action == 'SHORT':
-        current_position = 'SHORT'
-        entry_price = price
+    else: # SHORT
         sl_real = price + sl_pips
         tp_real = price - (sl_pips * 2.0)
-        
-    sl_price = sl_real
-    tp_price = tp_real
+
+    # Simpan ke Memory Bot
+    active_trades[symbol] = {
+        'type': action,
+        'entry': price,
+        'sl': sl_real,
+        'tp': tp_real
+    }
     
-    print(f"🚀 SIMULASI OPEN {action} at {price}")
-    
+    print(f"🚀 OPEN {action} {symbol} @ {price}")
     msg = (
-        f"📝 <b>SIMULASI PAPER TRADING</b>\n"
-        f"Action: <b>{action}</b> {SYMBOL}\n"
+        f"⚡ <b>SIGNAL ENTRY ({symbol})</b>\n"
+        f"Action: <b>{action}</b>\n"
         f"Price: {price}\n"
-        f"🎯 TP: {tp_real:.2f}\n"
-        f"🛑 SL: {sl_real:.2f}\n"
-        f"<i>(Ini bukan order asli, hanya simulasi)</i>"
+        f"🎯 TP: {tp_real:.4f}\n"
+        f"🛑 SL: {sl_real:.4f}\n"
+        f"Volatilitas: High"
     )
     send_telegram(msg)
 
-def check_exit_simulation(current_price):
-    global current_position, entry_price, sl_price, tp_price
-    
-    if current_position is None: return
+def check_exit(symbol, current_price):
+    trade = active_trades.get(symbol)
+    if not trade: return
 
-    pnl_pct = 0
-    exit_reason = ""
+    reason = ""
+    pnl_raw = 0
     
-    # LOGIKA EXIT LONG
-    if current_position == 'LONG':
-        if current_price >= tp_price:
-            exit_reason = "✅ TAKE PROFIT"
-            pnl_pct = (tp_price - entry_price) / entry_price * 100 * LEVERAGE
-        elif current_price <= sl_price:
-            exit_reason = "❌ STOP LOSS"
-            pnl_pct = (sl_price - entry_price) / entry_price * 100 * LEVERAGE
+    # Cek Kondisi Exit LONG
+    if trade['type'] == 'LONG':
+        if current_price >= trade['tp']:
+            reason = "✅ TAKE PROFIT"
+            pnl_raw = (trade['tp'] - trade['entry']) / trade['entry']
+        elif current_price <= trade['sl']:
+            reason = "❌ STOP LOSS"
+            pnl_raw = (trade['sl'] - trade['entry']) / trade['entry']
             
-    # LOGIKA EXIT SHORT
-    elif current_position == 'SHORT':
-        if current_price <= tp_price:
-            exit_reason = "✅ TAKE PROFIT"
-            pnl_pct = (entry_price - tp_price) / entry_price * 100 * LEVERAGE
-        elif current_price >= sl_price:
-            exit_reason = "❌ STOP LOSS"
-            pnl_pct = (entry_price - sl_price) / entry_price * 100 * LEVERAGE
+    # Cek Kondisi Exit SHORT
+    elif trade['type'] == 'SHORT':
+        if current_price <= trade['tp']:
+            reason = "✅ TAKE PROFIT"
+            pnl_raw = (trade['entry'] - trade['tp']) / trade['entry']
+        elif current_price >= trade['sl']:
+            reason = "❌ STOP LOSS"
+            pnl_raw = (trade['entry'] - trade['sl']) / trade['entry']
 
-    # Jika kena TP atau SL
-    if exit_reason:
-        print(f"EXIT {current_position}: {exit_reason}")
+    # Jika Exit Triggered
+    if reason:
+        pnl_pct = pnl_raw * 100 * LEVERAGE
+        print(f"EXIT {symbol}: {reason}")
+        
         msg = (
-            f"🏁 <b>POSISI DITUTUP (SIMULASI)</b>\n"
-            f"Status: <b>{exit_reason}</b>\n"
-            f"Close Price: {current_price}\n"
-            f"Estimasi PnL: {pnl_pct:.2f}% (Lev {LEVERAGE}x)"
+            f"🏁 <b>CLOSE POSITION ({symbol})</b>\n"
+            f"Status: <b>{reason}</b>\n"
+            f"Exit Price: {current_price}\n"
+            f"PnL (Lev {LEVERAGE}x): {pnl_pct:.2f}%"
         )
         send_telegram(msg)
         
-        # Reset Posisi
-        current_position = None
-        entry_price = 0
-        sl_price = 0
-        tp_price = 0
+        # Hapus dari memory
+        del active_trades[symbol]
 
 def run_bot():
-    send_telegram(f"🤖 <b>Bot Paper Trading Aktif</b>\nPair: {SYMBOL}\nData: REAL MARKET (Simulasi)")
-    print(f"Bot mulai monitoring {SYMBOL} (Real Data)...")
-
+    send_telegram(f"🤖 <b>Multi-Pair Bot Aktif!</b>\nMemantau: {len(SYMBOLS)} Pairs\nMode: Paper Trading")
+    
     while True:
-        try:
-            # Print log biar kelihatan di Coolify (di-force unbuffered)
-            print(f"[{datetime.now().strftime('%H:%M')}] Cek Market...", flush=True)
+        print(f"\n[{datetime.now().strftime('%H:%M')}] Scanning {len(SYMBOLS)} coins...", flush=True)
+        
+        for symbol in SYMBOLS:
+            # 1. Ambil Data
+            df = get_data(symbol)
+            if df is None: continue # Skip jika error ambil data
             
-            df = get_data()
-            if df is None: 
-                time.sleep(10)
-                continue
-                
             last = df.iloc[-1]
             prev = df.iloc[-2]
             current_price = last['close']
             
-            # 1. Cek apakah harus Close Posisi (TP/SL)?
-            if current_position is not None:
-                check_exit_simulation(current_price)
-            
-            # 2. Cek Entry Baru (Jika tidak ada posisi)
-            if current_position is None:
+            # 2. Cek apakah koin ini sedang punya posisi?
+            if symbol in active_trades:
+                # Kalau punya posisi, cek apakah harus TP/SL
+                check_exit(symbol, current_price)
+            else:
+                # Kalau kosong, cari sinyal Entry baru
                 cross_up = prev['EMA_9'] < prev['EMA_21'] and last['EMA_9'] > last['EMA_21']
                 trend_up = last['close'] > last['EMA_200']
                 
@@ -177,17 +165,15 @@ def run_bot():
                 trend_down = last['close'] < last['EMA_200']
                 
                 if cross_up and trend_up:
-                    execute_simulation('LONG', current_price, last['ATR'])
+                    open_position(symbol, 'LONG', current_price, last['ATR'])
                 elif cross_down and trend_down:
-                    execute_simulation('SHORT', current_price, last['ATR'])
-            else:
-                print(f"   -> Sedang dalam posisi {current_position}. Menunggu exit...", flush=True)
+                    open_position(symbol, 'SHORT', current_price, last['ATR'])
             
-            time.sleep(60) # Cek setiap 1 menit
+            # Jeda kecil antar koin biar IP tidak diblokir Binance
+            time.sleep(1) 
             
-        except Exception as e:
-            print(f"Loop Error: {e}", flush=True)
-            time.sleep(10)
+        print("...Scan Selesai. Tidur 60 detik.", flush=True)
+        time.sleep(60)
 
 if __name__ == "__main__":
     run_bot()
