@@ -1,11 +1,3 @@
-# Core library
-# Kunci numpy di bawah versi 2.0 agar kompatibel dengan pandas_ta
-numpy<2.0
-
-# Library Data
-pandas
-pandas_ta
-
-# Library Exchange & Utils
 ccxt
-schedule
+pandas
+requests
