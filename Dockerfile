@@ -11,4 +11,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY main.py .
 
-CMD ["python", "main.py"]
+# Tambahkan -u agar log langsung keluar
+CMD ["python", "-u", "main.py"]
+
