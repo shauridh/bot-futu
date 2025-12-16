@@ -4,30 +4,32 @@ import time
 import os
 import requests
 import sys
-import math
 from datetime import datetime
 
-# --- KONFIGURASI SCALPING ---
+# --- KONFIGURASI PRO (HIGH WINRATE) ---
 API_KEY = os.getenv("BINANCE_API_KEY")
 SECRET_KEY = os.getenv("BINANCE_SECRET_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# --- SETTING MODAL & RISIKO ---
-TRADE_SIZE_USDT = 5.0   # Tetap $5 per trade (Aman untuk modal 250rb)
-LEVERAGE = 10           # Leverage 10x
-MAX_OPEN_POSITIONS = 3  # Naikkan jadi 3 posisi karena scalping perputarannya cepat
+# --- MODAL & RISIKO ---
+TRADE_SIZE_USDT = 6.0   
+LEVERAGE = 10           
+MAX_OPEN_POSITIONS = 3  
 
-# --- SETTING TEKNIKAL SCALPING ---
-TIMEFRAME = '5m'        # Main di Timeframe 5 Menit (Cepat)
-TP_PERCENT = 0.015      # Target Profit 1.5% gerak harga (15% PnL)
-SL_PERCENT = 0.008      # Stop Loss 0.8% gerak harga (8% PnL)
+# --- TEKNIKAL ---
+# Kita butuh dua timeframe:
+TF_TREND = '1h'    # Untuk melihat arah angin (Filter)
+TF_ENTRY = '5m'    # Untuk eksekusi (Sniper)
+
+TP_PERCENT = 0.013      # Target 1.3%
+SL_PERCENT = 0.020      # SL 2% (Lebih longgar karena searah tren, jarang kena)
 
 # Memory
 active_trades = {}     
 current_symbols = []   
 
-print(f"--- STARTING SCALPING BOT (5 MINUTE) ---")
+print(f"--- STARTING HIGH WINRATE BOT (TREND FILTERED) ---")
 
 try:
     exchange = ccxt.binance({
@@ -36,9 +38,9 @@ try:
         'options': {'defaultType': 'future'},
         'enableRateLimit': True
     })
+    exchange.load_markets()
     balance = exchange.fetch_balance()
-    usdt_free = balance['USDT']['free']
-    print(f"✅ Login Sukses. Saldo: ${usdt_free:.2f}")
+    print(f"✅ Login Sukses. Saldo Available: ${balance['USDT']['free']:.2f}")
 except Exception as e:
     print(f"❌ Error Login: {e}")
     sys.exit(1)
@@ -50,55 +52,27 @@ def send_telegram(msg):
     try: requests.post(url, data=data, timeout=5)
     except: pass
 
-# --- SCANNER: Cari Koin Volatil (Banyak Gerak) ---
 def scan_top_coins():
+    # Cari koin volume besar agar teknikal valid
     try:
         tickers = exchange.fetch_tickers()
-        # Cari koin dengan % change terbesar (Volatil) dalam 24 jam terakhir
-        # Scalper suka koin yang 'liar' bukan yang diam
         valid_tickers = [d for s, d in tickers.items() if '/USDT' in s and d['quoteVolume']]
-        
-        # Sortir berdasarkan Quote Volume (Likuiditas) agar mudah jual/beli
         sorted_tickers = sorted(valid_tickers, key=lambda x: x['quoteVolume'], reverse=True)
-        
         top_coins = []
         for t in sorted_tickers:
             sym = t['symbol']
-            if any(x in sym for x in ['USDC', 'BUSD', 'USDP', 'FDUSD', 'TUSD']): continue
+            if any(x in sym for x in ['USDC', 'BUSD', 'FDUSD']): continue
             top_coins.append(sym)
-            if len(top_coins) >= 12: break # Pantau 12 Koin Teramai
+            if len(top_coins) >= 12: break 
         return top_coins
     except: return []
-
-def sync_existing_positions():
-    print("🔄 Sync Posisi Scalping...")
-    try:
-        positions = exchange.fetch_positions()
-        for pos in positions:
-            if float(pos['contracts']) > 0:
-                symbol = pos['symbol']
-                side = 'LONG' if pos['side'] == 'long' else 'SHORT'
-                entry = float(pos['entryPrice'])
-                
-                # Set TP/SL Default Scalping jika restart
-                if side == 'LONG':
-                    tp = entry * (1 + TP_PERCENT)
-                    sl = entry * (1 - SL_PERCENT)
-                else:
-                    tp = entry * (1 - TP_PERCENT)
-                    sl = entry * (1 + SL_PERCENT)
-                
-                active_trades[symbol] = {'type': side, 'entry': entry, 'tp': tp, 'sl': sl}
-    except: pass
 
 def execute_order(symbol, side, price):
     try:
         try: exchange.set_leverage(LEVERAGE, symbol)
         except: pass 
-
         amount_raw = (TRADE_SIZE_USDT * LEVERAGE) / price
         amount = exchange.amount_to_precision(symbol, amount_raw)
-        
         order_type = 'buy' if side == 'LONG' else 'sell'
         exchange.create_market_order(symbol, order_type, amount)
         return True
@@ -114,88 +88,98 @@ def close_position_real(symbol, side):
             if p['symbol'] == symbol:
                 amt = float(p['contracts'])
                 break
-        
         if amt > 0:
             direction = 'sell' if side == 'LONG' else 'buy'
             exchange.create_market_order(symbol, direction, amt, params={'reduceOnly': True})
             return True
     except: return False
 
-# --- INDIKATOR CEPAT (EMA 5/12) ---
-def calculate_indicators(df):
-    # EMA Sangat Pendek untuk 5 Menit
-    df['EMA_FAST'] = df['close'].ewm(span=5, adjust=False).mean()
-    df['EMA_SLOW'] = df['close'].ewm(span=12, adjust=False).mean()
-    
-    # Trend Filter (EMA 200 di 5m) - Pastikan searah tren besar
-    df['EMA_TREND'] = df['close'].ewm(span=200, adjust=False).mean()
-    
-    # RSI Standard
-    delta = df['close'].diff()
-    gain = delta.where(delta > 0, 0).ewm(alpha=1/14, adjust=False).mean()
-    loss = -delta.where(delta < 0, 0).ewm(alpha=1/14, adjust=False).mean()
-    rs = gain / loss
-    df['RSI'] = 100 - (100 / (1 + rs))
-    
-    return df
+# --- FUNGSI ANALISA UTAMA ---
 
-def get_data(symbol):
+def get_trend_direction(symbol):
+    # Cek Tren di Timeframe 1 Jam (EMA 200)
     try:
-        # Ambil data lebih sedikit biar ringan (100 candle 5 menit)
-        bars = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=100)
+        bars = exchange.fetch_ohlcv(symbol, timeframe=TF_TREND, limit=210)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-        return calculate_indicators(df)
-    except: return None
+        ema200 = df['close'].ewm(span=200, adjust=False).mean().iloc[-1]
+        price = df['close'].iloc[-1]
+        
+        if price > ema200: return 'UPTREND'
+        elif price < ema200: return 'DOWNTREND'
+        return 'SIDEWAYS'
+    except: return 'ERROR'
+
+def get_entry_signal(symbol):
+    # Cek Sinyal di Timeframe 5 Menit (RSI + BB)
+    try:
+        bars = exchange.fetch_ohlcv(symbol, timeframe=TF_ENTRY, limit=50)
+        df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
+        
+        # Indikator
+        df['SMA20'] = df['close'].rolling(window=20).mean()
+        df['STD20'] = df['close'].rolling(window=20).std()
+        df['BB_UPPER'] = df['SMA20'] + (df['STD20'] * 2)
+        df['BB_LOWER'] = df['SMA20'] - (df['STD20'] * 2)
+        
+        delta = df['close'].diff()
+        gain = delta.where(delta > 0, 0).ewm(alpha=1/14, adjust=False).mean()
+        loss = -delta.where(delta < 0, 0).ewm(alpha=1/14, adjust=False).mean()
+        rs = gain / loss
+        df['RSI'] = 100 - (100 / (1 + rs))
+        
+        last = df.iloc[-1]
+        price = last['close']
+        
+        # Logika Reversal
+        if (price < last['BB_LOWER']) and (last['RSI'] < 30): return 'BUY_SIGNAL', price, last['RSI']
+        if (price > last['BB_UPPER']) and (last['RSI'] > 70): return 'SELL_SIGNAL', price, last['RSI']
+        
+        return None, price, 0
+    except: return None, 0, 0
 
 def check_market(symbol):
-    df = get_data(symbol)
-    if df is None: return
-    
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
-    price = last['close']
-    
-    # 1. CEK EXIT (TP/SL)
+    # 1. CEK EXIT
     if symbol in active_trades:
         trade = active_trades[symbol]
-        reason = ""
+        df_now = exchange.fetch_ticker(symbol)
+        price = df_now['last']
         
-        # Logika Exit Keras (Hitung Manual)
+        reason = ""
         if trade['type'] == 'LONG':
-            if price >= trade['tp']: reason = "✅ TP (Scalp)"
-            elif price <= trade['sl']: reason = "❌ SL (Scalp)"
+            if price >= trade['tp']: reason = "✅ TP (Win)"
+            elif price <= trade['sl']: reason = "❌ SL (Loss)"
         elif trade['type'] == 'SHORT':
-            if price <= trade['tp']: reason = "✅ TP (Scalp)"
-            elif price >= trade['sl']: reason = "❌ SL (Scalp)"
+            if price <= trade['tp']: reason = "✅ TP (Win)"
+            elif price >= trade['sl']: reason = "❌ SL (Loss)"
             
         if reason:
             if close_position_real(symbol, trade['type']):
-                pnl = (TP_PERCENT * 100 * LEVERAGE) if "TP" in reason else (-SL_PERCENT * 100 * LEVERAGE)
-                send_telegram(f"⚡ <b>CLOSE {symbol}</b>\n{reason}\nResult: {pnl:.1f}% (Est)")
+                send_telegram(f"💰 <b>RESULT {symbol}</b>\n{reason}\nExit: {price}")
                 del active_trades[symbol]
         return
 
-    # 2. CEK ENTRY
+    # 2. CEK ENTRY (FILTERED)
     if len(active_trades) >= MAX_OPEN_POSITIONS: return
 
-    # LOGIKA ENTRY SCALPING 5 MENIT:
-    # 1. Cross EMA 5 & 12 (Sangat Cepat)
-    # 2. RSI tidak Overbought/Oversold (Masih ada nafas)
-    
-    cross_up = prev['EMA_FAST'] < prev['EMA_SLOW'] and last['EMA_FAST'] > last['EMA_SLOW']
-    cross_down = prev['EMA_FAST'] > prev['EMA_SLOW'] and last['EMA_FAST'] < last['EMA_SLOW']
-    
-    # Filter Trend (Opsional, matikan jika ingin counter-trend. Tapi aman dinyalakan)
-    is_uptrend = price > last['EMA_TREND']
-    is_downtrend = price < last['EMA_TREND']
+    # Tahap A: Cek Tren Besar (1 Jam)
+    major_trend = get_trend_direction(symbol)
+    if major_trend == 'ERROR': return
+
+    # Tahap B: Cek Sinyal Kecil (5 Menit)
+    signal, price, rsi = get_entry_signal(symbol)
     
     action = None
-    if cross_up and is_uptrend and last['RSI'] < 70: action = 'LONG'
-    elif cross_down and is_downtrend and last['RSI'] > 30: action = 'SHORT'
+    
+    # KUNCI WINRATE: Hanya ambil sinyal yang SEARAH tren besar
+    if signal == 'BUY_SIGNAL' and major_trend == 'UPTREND':
+        action = 'LONG'
+    elif signal == 'SELL_SIGNAL' and major_trend == 'DOWNTREND':
+        action = 'SHORT'
+    
+    # Catatan: Jika Tren UPTREND tapi sinyal SELL, bot akan DIAM (Menghindari Loss)
     
     if action:
         if execute_order(symbol, action, price):
-            # Hitung TP/SL Fixed
             if action == 'LONG':
                 tp = price * (1 + TP_PERCENT)
                 sl = price * (1 - SL_PERCENT)
@@ -204,29 +188,25 @@ def check_market(symbol):
                 sl = price * (1 + SL_PERCENT)
             
             active_trades[symbol] = {'type': action, 'entry': price, 'tp': tp, 'sl': sl}
-            send_telegram(f"🔫 <b>SCALP {action} ({symbol})</b>\nPrice: {price}\nTP: {tp:.5f}\nSL: {sl:.5f}")
+            send_telegram(f"🛡️ <b>FILTERED ENTRY ({symbol})</b>\nTrend 1H: {major_trend}\nAction: {action}\nPrice: {price}\nTP: {tp:.4f}")
 
 def run_bot():
     global current_symbols
-    sync_existing_positions()
     current_symbols = scan_top_coins()
-    
-    send_telegram(f"🏎️ <b>SCALPING BOT STARTED</b>\nTF: 5 Min | EMA 5/12\nTP: {TP_PERCENT*100}% | SL: {SL_PERCENT*100}%\nMax Pos: 3")
+    send_telegram(f"🦅 <b>HIGH WINRATE BOT STARTED</b>\nFilter: EMA 200 (1H)\nEntry: RSI+BB (5m)\nTP: {TP_PERCENT*100}%")
     
     cycle = 0
     while True:
-        # Update list koin tiap 30 menit (Scalping butuh data segar)
-        if cycle % 30 == 0: 
+        if cycle % 100 == 0: 
             new = scan_top_coins()
             if new: current_symbols = new
             
-        print(f"[{datetime.now().strftime('%H:%M')}] Scalping {len(current_symbols)} Coins...", flush=True)
-            
+        print(f"Scanning {len(current_symbols)} coins with Trend Filter...", flush=True)
         for sym in current_symbols:
             check_market(sym)
-            time.sleep(1) # Jeda 1 detik
+            time.sleep(1.5) # Agak santai sedikit biar API aman
             
-        time.sleep(10) # Jeda antar cycle cuma 10 detik (Scalping harus cepat)
+        time.sleep(10)
         cycle += 1
 
 if __name__ == "__main__":
