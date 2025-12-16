@@ -4,48 +4,46 @@ import time
 import os
 import requests
 import sys
+import math
 from datetime import datetime
 
-# --- KONFIGURASI ---
+# --- KONFIGURASI LIVE ---
+API_KEY = os.getenv("BINANCE_API_KEY")
+SECRET_KEY = os.getenv("BINANCE_SECRET_KEY")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# --- DAFTAR 45 KOIN FUTURES TERAMAI (THE LIQUID 45) ---
-SYMBOLS = [
-    # 1. THE KINGS
-    'BTC/USDT', 'ETH/USDT', 'BNB/USDT', 'SOL/USDT', 'XRP/USDT',
-    
-    # 2. TOP ALTS (L1)
-    'ADA/USDT', 'AVAX/USDT', 'TRX/USDT', 'DOT/USDT', 'LINK/USDT',
-    'MATIC/USDT', 'LTC/USDT', 'BCH/USDT', 'NEAR/USDT', 'ATOM/USDT',
-    'APT/USDT', 'SUI/USDT', 'SEI/USDT', 'INJ/USDT', 'FTM/USDT',
-    
-    # 3. MEME COINS (High Risk High Reward)
-    'DOGE/USDT', 'SHIB/USDT', 'PEPE/USDT', 'WIF/USDT', 'BONK/USDT', 'FLOKI/USDT',
-    
-    # 4. LAYER 2 & DEFI
-    'ARB/USDT', 'OP/USDT', 'LDO/USDT', 'UNI/USDT', 'AAVE/USDT',
-    'MKR/USDT', 'SNX/USDT', 'TIA/USDT', 'STRK/USDT',
-    
-    # 5. AI & GAMING
-    'RNDR/USDT', 'FET/USDT', 'GALA/USDT', 'SAND/USDT', 'MANA/USDT',
-    'IMX/USDT', 'AXS/USDT', 'GRT/USDT', 'THETA/USDT'
-]
+# --- SETTING KHUSUS MODAL KECIL (RP 250.000 / $15.5) ---
+TRADE_SIZE_USDT = 5.0   # Hanya pakai $5 per posisi (Rp 80rb-an)
+LEVERAGE = 10           # Leverage 10x (Wajib, biar memenuhi syarat min order Binance)
+MAX_OPEN_POSITIONS = 2  # Maksimal pegang 2 koin saja (Jaga margin aman)
 
-TIMEFRAME = '1h'         
-LEVERAGE = 10 
+TIMEFRAME = '1h'
 
-# Memory Posisi
-active_trades = {}
+# Global Memory
+active_trades = {}     
+current_symbols = []   
 
-print(f"--- STARTING MEGA-BOT ({len(SYMBOLS)} Pairs) ---")
+print(f"--- STARTING LIVE BOT (MICRO ACCOUNT MODE) ---")
 
+# Inisialisasi Koneksi Binance
 try:
-    exchange = ccxt.binance({'options': {'defaultType': 'future'}})
-    exchange.load_markets()
-    print("✅ Koneksi Binance OK.")
+    exchange = ccxt.binance({
+        'apiKey': API_KEY,
+        'secret': SECRET_KEY,
+        'options': {'defaultType': 'future'},
+        'enableRateLimit': True
+    })
+    # Cek saldo
+    balance = exchange.fetch_balance()
+    usdt_free = balance['USDT']['free']
+    print(f"✅ Login Sukses. Saldo: ${usdt_free:.2f}")
+    
+    if usdt_free < 10:
+        print("⚠️ PERINGATAN: Saldo sangat mepet (< $10). Bot mungkin gagal order.")
+        
 except Exception as e:
-    print(f"❌ Error Init: {e}")
+    print(f"❌ Gagal Login Binance: {e}")
     sys.exit(1)
 
 def send_telegram(msg):
@@ -55,143 +53,193 @@ def send_telegram(msg):
     try: requests.post(url, data=data, timeout=10)
     except: pass
 
+# --- SMART SCANNER (Cari Koin Ramai) ---
+def scan_top_coins():
+    try:
+        tickers = exchange.fetch_tickers()
+        valid_tickers = [d for s, d in tickers.items() if '/USDT' in s and d['quoteVolume']]
+        sorted_tickers = sorted(valid_tickers, key=lambda x: x['quoteVolume'], reverse=True)
+        
+        top_coins = []
+        for t in sorted_tickers:
+            sym = t['symbol']
+            # Hindari Stablecoin
+            if any(x in sym for x in ['USDC', 'BUSD', 'USDP', 'FDUSD', 'TUSD']): continue
+            top_coins.append(sym)
+            if len(top_coins) >= 15: break # Pantau Top 15
+        return top_coins
+    except: return []
+
+# --- SYNC POSISI SAAT RESTART ---
+def sync_existing_positions():
+    print("🔄 Cek Posisi Aktif di Binance...")
+    try:
+        positions = exchange.fetch_positions()
+        count = 0
+        for pos in positions:
+            if float(pos['contracts']) > 0:
+                symbol = pos['symbol']
+                side = 'LONG' if pos['side'] == 'long' else 'SHORT'
+                entry = float(pos['entryPrice'])
+                
+                # Set TP/SL Darurat jika restart
+                if side == 'LONG':
+                    tp = entry * 1.04 # TP 4%
+                    sl = entry * 0.98 # SL 2%
+                else:
+                    tp = entry * 0.96
+                    sl = entry * 1.02
+                
+                active_trades[symbol] = {'type': side, 'entry': entry, 'tp': tp, 'sl': sl}
+                count += 1
+        print(f"✅ Ditemukan {count} posisi berjalan.")
+    except Exception as e:
+        print(f"⚠️ Gagal Sync: {e}")
+
+# --- EKSEKUSI ORDER ---
+def execute_order(symbol, side, price):
+    try:
+        # 1. Set Leverage
+        try: exchange.set_leverage(LEVERAGE, symbol)
+        except: pass 
+
+        # 2. Hitung Size
+        # Modal $5 x Leverage 10 = Order Size $50 (Aman, diatas min $5)
+        amount_raw = (TRADE_SIZE_USDT * LEVERAGE) / price
+        amount = exchange.amount_to_precision(symbol, amount_raw)
+        
+        # 3. Order
+        order_type = 'buy' if side == 'LONG' else 'sell'
+        exchange.create_market_order(symbol, order_type, amount)
+        
+        print(f"✅ SUCCESS {side} {symbol}")
+        return True
+    except Exception as e:
+        print(f"❌ Gagal Order {symbol}: {e}")
+        # Kirim notif error biar tau kalau saldo kurang/error lain
+        send_telegram(f"⚠️ <b>GAGAL ORDER {symbol}</b>\nMsg: {e}")
+        return False
+
+def close_position_real(symbol, side):
+    try:
+        positions = exchange.fetch_positions([symbol])
+        amt = 0
+        for p in positions:
+            if p['symbol'] == symbol:
+                amt = float(p['contracts'])
+                break
+        
+        if amt > 0:
+            direction = 'sell' if side == 'LONG' else 'buy'
+            exchange.create_market_order(symbol, direction, amt, params={'reduceOnly': True})
+            print(f"✅ CLOSED {symbol}")
+            return True
+    except Exception as e:
+        print(f"❌ Gagal Close {symbol}: {e}")
+        return False
+
+# --- LOGIKA EMA AGGRESSIVE ---
 def calculate_indicators(df):
-    # EMA Aggressive (7 & 14)
     df['EMA_FAST'] = df['close'].ewm(span=7, adjust=False).mean()
     df['EMA_SLOW'] = df['close'].ewm(span=14, adjust=False).mean()
-    
-    # EMA Trend Filter (200)
     df['EMA_TREND'] = df['close'].ewm(span=200, adjust=False).mean()
     
-    # RSI
     delta = df['close'].diff()
     gain = delta.where(delta > 0, 0).ewm(alpha=1/14, adjust=False).mean()
     loss = -delta.where(delta < 0, 0).ewm(alpha=1/14, adjust=False).mean()
     rs = gain / loss
     df['RSI'] = 100 - (100 / (1 + rs))
     
-    # ATR
-    df['tr1'] = df['high'] - df['low']
-    df['tr2'] = abs(df['high'] - df['close'].shift())
-    df['tr3'] = abs(df['low'] - df['close'].shift())
-    df['tr'] = df[['tr1', 'tr2', 'tr3']].max(axis=1)
+    df['tr'] = df[['high', 'low', 'close']].apply(lambda x: max(x['high']-x['low'], abs(x['high']-x['close']), abs(x['low']-x['close'])), axis=1)
     df['ATR'] = df['tr'].rolling(window=14).mean()
-    
     return df
 
 def get_data(symbol):
     try:
         bars = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=205)
         df = pd.DataFrame(bars, columns=['time', 'open', 'high', 'low', 'close', 'vol'])
-        df['time'] = pd.to_datetime(df['time'], unit='ms')
         return calculate_indicators(df)
     except: return None
 
-def open_position(symbol, action, price, atr, rsi):
-    # SL 1.5x ATR (Agak longgar dikit karena koin volatile)
-    sl_pips = atr * 1.5
+def check_market(symbol):
+    df = get_data(symbol)
+    if df is None: return
     
-    if action == 'LONG':
-        sl_real = price - sl_pips
-        tp_real = price + (sl_pips * 3.0) # RR 1:3 (Cari untung lebar)
-    else: # SHORT
-        sl_real = price + sl_pips
-        tp_real = price - (sl_pips * 3.0)
-
-    active_trades[symbol] = {
-        'type': action,
-        'entry': price,
-        'sl': sl_real,
-        'tp': tp_real
-    }
+    last = df.iloc[-1]
+    prev = df.iloc[-2]
+    price = last['close']
     
-    print(f"🚀 OPEN {action} {symbol} @ {price}")
-    msg = (
-        f"⚡ <b>SIGNAL ENTRY ({symbol})</b>\n"
-        f"Action: <b>{action}</b>\n"
-        f"Price: {price}\n"
-        f"RSI: {rsi:.1f}\n"
-        f"🎯 TP: {tp_real:.4f}\n"
-        f"🛑 SL: {sl_real:.4f}"
-    )
-    send_telegram(msg)
-
-def check_exit(symbol, current_price):
-    trade = active_trades.get(symbol)
-    if not trade: return
-
-    reason = ""
-    pnl_raw = 0
-    
-    if trade['type'] == 'LONG':
-        if current_price >= trade['tp']:
-            reason = "✅ TAKE PROFIT"
-            pnl_raw = (trade['tp'] - trade['entry']) / trade['entry']
-        elif current_price <= trade['sl']:
-            reason = "❌ STOP LOSS"
-            pnl_raw = (trade['sl'] - trade['entry']) / trade['entry']
+    # 1. CEK EXIT
+    if symbol in active_trades:
+        trade = active_trades[symbol]
+        reason = ""
+        pnl = 0
+        
+        if trade['type'] == 'LONG':
+            if price >= trade['tp']: reason = "✅ TAKE PROFIT"
+            elif price <= trade['sl']: reason = "❌ STOP LOSS"
+        elif trade['type'] == 'SHORT':
+            if price <= trade['tp']: reason = "✅ TAKE PROFIT"
+            elif price >= trade['sl']: reason = "❌ STOP LOSS"
             
-    elif trade['type'] == 'SHORT':
-        if current_price <= trade['tp']:
-            reason = "✅ TAKE PROFIT"
-            pnl_raw = (trade['entry'] - trade['tp']) / trade['entry']
-        elif current_price >= trade['sl']:
-            reason = "❌ STOP LOSS"
-            pnl_raw = (trade['entry'] - trade['sl']) / trade['entry']
+        if reason:
+            success = close_position_real(symbol, trade['type'])
+            if success:
+                if trade['type'] == 'LONG': pnl = (price - trade['entry']) / trade['entry'] * 100 * LEVERAGE
+                else: pnl = (trade['entry'] - price) / trade['entry'] * 100 * LEVERAGE
+                send_telegram(f"💰 <b>REALIZED PnL ({symbol})</b>\nStatus: {reason}\nResult: {pnl:.2f}% (Est)")
+                del active_trades[symbol]
+        return
 
-    if reason:
-        pnl_pct = pnl_raw * 100 * LEVERAGE
-        print(f"EXIT {symbol}: {reason}")
-        msg = (
-            f"🏁 <b>CLOSE ({symbol})</b>\n"
-            f"Status: <b>{reason}</b>\n"
-            f"PnL: {pnl_pct:.2f}% (Lev {LEVERAGE}x)"
-        )
-        send_telegram(msg)
-        del active_trades[symbol]
+    # 2. CEK ENTRY (Cuma boleh jika posisi < 2)
+    if len(active_trades) >= MAX_OPEN_POSITIONS: return
+
+    # Logic: Cross EMA 7/14 + Trend + RSI
+    cross_up = prev['EMA_FAST'] < prev['EMA_SLOW'] and last['EMA_FAST'] > last['EMA_SLOW']
+    cross_down = prev['EMA_FAST'] > prev['EMA_SLOW'] and last['EMA_FAST'] < last['EMA_SLOW']
+    is_uptrend = price > last['EMA_TREND']
+    is_downtrend = price < last['EMA_TREND']
+    
+    action = None
+    if cross_up and is_uptrend and last['RSI'] < 70: action = 'LONG'
+    elif cross_down and is_downtrend and last['RSI'] > 30: action = 'SHORT'
+    
+    if action:
+        success = execute_order(symbol, action, price)
+        if success:
+            atr = last['ATR']
+            sl_pips = atr * 1.5
+            if action == 'LONG':
+                sl = price - sl_pips
+                tp = price + (sl_pips * 3.0)
+            else:
+                sl = price + sl_pips
+                tp = price - (sl_pips * 3.0)
+            
+            active_trades[symbol] = {'type': action, 'entry': price, 'tp': tp, 'sl': sl}
+            send_telegram(f"🚀 <b>OPEN {action} ({symbol})</b>\nEntry: {price}\nTP: {tp:.4f}\nSL: {sl:.4f}")
 
 def run_bot():
-    send_telegram(f"🤖 <b>Mega-Bot Aktif!</b>\nMemantau {len(SYMBOLS)} Koin Futures\nMode: Aggressive EMA 7/14")
+    global current_symbols
+    sync_existing_positions()
     
+    current_symbols = scan_top_coins()
+    send_telegram(f"🤖 <b>BOT LIVE (MODAL 250RB)</b>\nMargin: $5/trade\nMax Pos: 2 Trade\nScan: {len(current_symbols)} Coins")
+    
+    cycle = 0
     while True:
-        print(f"\n[{datetime.now().strftime('%H:%M')}] Scanning {len(SYMBOLS)} Pairs...", flush=True)
-        
-        for symbol in SYMBOLS:
-            df = get_data(symbol)
-            if df is None: continue
+        if cycle % 60 == 0: 
+            new_sym = scan_top_coins()
+            if new_sym: current_symbols = new_sym
             
-            last = df.iloc[-1]
-            prev = df.iloc[-2]
-            current_price = last['close']
+        print(f"[{datetime.now().strftime('%H:%M')}] Scanning {len(current_symbols)} Top Coins...", flush=True)
             
-            if symbol in active_trades:
-                check_exit(symbol, current_price)
-            else:
-                # STRATEGI:
-                # 1. EMA Cross (7 & 14)
-                # 2. Trend Filter (EMA 200)
-                # 3. RSI Filter (30-70)
-                
-                cross_up = prev['EMA_FAST'] < prev['EMA_SLOW'] and last['EMA_FAST'] > last['EMA_SLOW']
-                cross_down = prev['EMA_FAST'] > prev['EMA_SLOW'] and last['EMA_FAST'] < last['EMA_SLOW']
-                
-                is_uptrend = last['close'] > last['EMA_TREND']
-                is_downtrend = last['close'] < last['EMA_TREND']
-                
-                rsi_safe_buy = last['RSI'] < 70
-                rsi_safe_sell = last['RSI'] > 30
-                
-                if cross_up and is_uptrend and rsi_safe_buy:
-                    open_position(symbol, 'LONG', current_price, last['ATR'], last['RSI'])
-                    
-                elif cross_down and is_downtrend and rsi_safe_sell:
-                    open_position(symbol, 'SHORT', current_price, last['ATR'], last['RSI'])
-            
-            # Delay 1 detik per koin sangat penting agar tidak kena Banned Binance
+        for sym in current_symbols:
+            check_market(sym)
             time.sleep(1) 
             
-        print("...Cycle Selesai. Istirahat 30 detik.")
         time.sleep(30)
+        cycle += 1
 
 if __name__ == "__main__":
     run_bot()
